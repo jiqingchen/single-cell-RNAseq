@@ -1,0 +1,199 @@
+---
+title: "scRNA seq pre-processing"
+author: "Ji-Qing Chen"
+date: "2024-04-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data Source
+```{bash}
+# Sample (fastq file size: 10.3 GB) comes from https://www.10xgenomics.com/datasets/2-k-sorted-cells-from-human-glioblastoma-multiforme-3-v-3-1-3-1-standard-6-0-0
+# Title: 2k Sorted Cells from Human Glioblastoma Multiforme, 3’ v3.1
+
+######## References ########
+# Installing and running Cell Ranger: https://www.youtube.com/watch?v=6heXkouNZpk
+
+# Base on library preparation type, choosing different pipeline: https://www.10xgenomics.com/support/software/cell-ranger/latest/analysis/running-pipelines/cr-choosing-a-pipeline
+
+# Arguments of cellranger (Also includes If your fastq files contain multiple reads): https://www.10xgenomics.com/support/software/cell-ranger/latest/analysis/inputs/cr-specifying-fastqs
+# https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/using/multi
+```
+
+# Cell Ranger and Reference Download
+```{bash}
+# enter into hpc system
+ssh -Y f0034wq@discovery7.hpcc.dartmouth.edu -L 5029:localhost:5029
+ssh gv01 -L 5029:localhost:5029
+cd /dartfs/rc/nosnapshots/V/VaickusL-nb/EDIT_Interns_2023/user/JiQing/scRNA
+
+# Source: https://www.10xgenomics.com/support/software/cell-ranger/downloads
+# Download Cell Ranger
+curl -o cellranger-8.0.0.tar.gz "https://cf.10xgenomics.com/releases/cell-exp/cellranger-8.0.0.tar.gz?Expires=1712592371&Key-Pair-Id=APKAI7S6A5RYOXBWRPDA&Signature=nkNpSL7QTITmTUmFd-WvkrmxaTNqyaqvBGCuoy3J7lVuS~aWStNNpmGNeRJL~dBKmxipFmuSOIu3CfWycag5W5qtWu3l~EZZAVugb3N~5lDwcdzMvSXI5oMyQ65ZRf83h5zuLqioYTCMqc16qFF802XQNeMrimiirMdWX2oWEMIHKuqVDD4ZK09Jse9aEDaWAXb8peYlFZbxalTNyfGnGy9z3CoUuNehKXg1F7A3Cj-6S6WAVm1Fol5IEQ2Jr9xjxkGRJjbjNqD-aTW4gMRu2g01qXC9sXrx2pMM7JwjEfTn0dSyRY5B51jLMxazNGH8Cn2F5VcJAtHga~BuESWuHg__"
+
+# unzip cellranger
+tar -xf cellranger-8.0.0.tar.gz
+
+# Download Reference (Human GRCh38)
+curl -O "https://cf.10xgenomics.com/supp/cell-exp/refdata-gex-GRCh38-2024-A.tar.gz"
+
+# unzip Reference
+tar -xf refdata-gex-GRCh38-2024-A.tar.gz
+
+# Remove unused files to release some space
+rm *.gz
+```
+
+# Check sample files
+```{bash}
+ls Brain_Tumor_3p_fastqs
+# Brain_Tumor_3p_S2_L001_I1_001.fastq.gz  Brain_Tumor_3p_S2_L002_I1_001.fastq.gz  Brain_Tumor_3p_S2_L003_I1_001.fastq.gz  Brain_Tumor_3p_S2_L004_I1_001.fastq.gz
+# Brain_Tumor_3p_S2_L001_I2_001.fastq.gz  Brain_Tumor_3p_S2_L002_I2_001.fastq.gz  Brain_Tumor_3p_S2_L003_I2_001.fastq.gz  Brain_Tumor_3p_S2_L004_I2_001.fastq.gz
+# Brain_Tumor_3p_S2_L001_R1_001.fastq.gz  Brain_Tumor_3p_S2_L002_R1_001.fastq.gz  Brain_Tumor_3p_S2_L003_R1_001.fastq.gz  Brain_Tumor_3p_S2_L004_R1_001.fastq.gz
+# Brain_Tumor_3p_S2_L001_R2_001.fastq.gz  Brain_Tumor_3p_S2_L002_R2_001.fastq.gz  Brain_Tumor_3p_S2_L003_R2_001.fastq.gz  Brain_Tumor_3p_S2_L004_R2_001.fastq.gz
+
+# Sample ID: Brain_Tumor_3p
+# Sample Number: S2
+# Index files: Lxxx_Ix_xxx.fastq.gz
+# When running cellranger, you need to keep file names: L002_I1_001, L001_R1_001, L002_R2_001... If you don't see those in the file name, please change the file name to meet the format.
+```
+
+# Run cellranger
+```{bash}
+# (Around 1 hour)
+cellranger-8.0.0/cellranger count --id Brain_Test --transcriptome refdata-gex-GRCh38-2024-A/ --fastqs Brain_Tumor_3p_fastqs/ --sample Brain_Tumor_3p --expect-cells 2000 --localcores 20 --localmem 100 --create-bam true
+
+# count: function name
+# --id: output folder name
+# --transcriptome: path of the reference directory
+# --fastqs: path of the directory containing fastq files
+# --sample: samples prefix; such as Brain_Tumor_3p (anything before _Sx_Lxxx_Rx_xxx.fastq.gz)
+# --expect-cells: the number of cells that they aimed for when they did the wet lab experiment. (usually range: 1000 ~ 10000). It doesn't have to be exact but you want it to be at least in the ballpark of how many cells they aimed for when they formed the single cell suspension.
+# --localcores: how many cpu threads you will use
+# --localmem: number of GB of RAM (memory)
+
+# After finishing, all necessary files such as, web_summary.html, filtered_feature_bc_matrix.h5, raw_feature_bc_matrix.h5, or possorted_genome_bam.bam (if --create-bam true) are in the Brain_Test/outs directory
+```
+
+_____________________________________________________________
+
+# Using CellBender to remove ambient / background RNA from a count matrix, such as one produced by the 10x Genomics’ CellRanger pipeline.
+
+# Intro
+```{bash}
+# 10x Genomics single cell assays normally produce a low level of background RNA counts.
+
+# Background mRNA could derive from cell-free RNA molecules in the cell suspension, ruptured, dead or dying cells, or from other exogenous sources of contamination.The nuclei preparation protocols typically release cytoplasmic RNA into solution (please see our new Chromium Nuclei Isolation product). High debris in such samples will lead to more ambient RNA in the data
+
+# One source is from cell-free RNA molecules in the cell suspension (ambient mRNA) which can lead to inflated UMI counts, even in cell-free GEMs. Ambient mRNA could derive from ruptured, dead or dying cells, or from other exogenous sources of contamination.
+
+# If not accounted for, and especially if present at moderate to high levels, background UMI counts could lead to systematic biases or batch effects in downstream analyses. If present in moderate to high levels, ambient RNA can be problematic for downstream analyses for two major reasons: (1) ambient RNA can contaminate the endogenous gene expression profile, confounding cell type annotation results, and (2) differences between conditions may be driven by differences in ambient profiles rather than true biological differences.
+
+# High background counts tend to occur more frequently in certain tissue types (Madisson et al), particularly when working with single cell nuclei samples (protocols typically release cytoplasmic RNA).
+
+# CellBender uses a machine learning model that is used to train the background RNA profile, distinguish cell-containing droplets from empty ones, and retrieve cleaner gene expression profiles.
+```
+
+# References
+```{bash}
+# Contains how to import cellbender output into Seurate. Because Seurat 4.0.2 uses a dataloader Read10X_h5() which is not currently compatible with the CellBender output file format.
+https://cellbender.readthedocs.io/en/latest/tutorial/index.html#remove-background
+
+# Deal with a compromised nuclei dataset; performance of cellbender on compromised nuclei dataset
+https://www.10xgenomics.com/analysis-guides/background-removal-guidance-for-single-cell-gene-expression-datasets-using-third-party-tools
+
+# When and how to correct for ambient RNA
+https://www.10xgenomics.com/analysis-guides/introduction-to-ambient-rna-correction
+```
+
+# Installation
+```{bash}
+# log in 
+ssh -Y f0034wq@discovery7.hpcc.dartmouth.edu -L 5029:localhost:5029
+ssh gv01 -L 5029:localhost:5029
+
+# Install CellBender in its own conda environment. This allows for easier installation and prevents conflicts with any other python packages you may have installed.
+conda create -n cellbender python=3.7
+conda activate cellbender
+pip install cellbender
+
+# Check GPU availability
+nvidia-smi 
+```
+
+# Run cellbender (first time: Focus on learning rate)
+```{bash}
+# change directory to the folder containing raw_feature_bc_matrix.h5 (output of cellranger)
+cd /dartfs/rc/nosnapshots/V/VaickusL-nb/EDIT_Interns_2023/user/JiQing/scRNA/Brain_Test/outs
+
+# The output of cellranger count produces a raw .h5 file that is used as the input for remove-background
+##### First Time Using Default Setting ##### 
+cellbender remove-background --cuda --input raw_feature_bc_matrix.h5 --output background_removed_output_file.h5
+# The output of remove-background includes a new .h5 count matrix, with background RNA removed, that can directly be used in downstream analysis in Seurat or scanpy as if it were the raw dataset.
+
+# remove-background: This is a module within the CellBender package. It implements a fast and scalable maximum-likelihood (ML) inference algorithm that inputs raw gene-by-cell count matrices and UMI information along with certain parameters.
+```
+
+# Outputs
+```{bash}
+# Reference: https://cellbender.readthedocs.io/en/latest/usage/index.html
+
+# It will produce eight output files:
+
+
+# output.h5: Full count matrix as an h5 file, with background RNA removed. This file contains all the original droplet barcodes.
+# output_filtered.h5: Filtered count matrix as an h5 file, with background RNA removed. The word “filtered” means that this file contains only the droplets which were determined to have a > 50% posterior probability of containing cells.
+
+# output_cell_barcodes.csv: CSV file containing all the droplet barcodes which were determined to have a > 50% posterior probability of containing cells. This information is also contained in each of the above outputs, but is included as a separate output for convenient use in certain downstream applications.
+
+# output_posterior.h5: The full posterior probability of noise counts. This is not normally used downstream.
+
+#################################################################################
+
+# If you are interested in saving space and you do not need to re-run cellbender, only the output.h5 need to be stored.
+# The ckpt.tar.gz in particular is a large file which can be deleted to save disk storage space. (However, if you keep this checkpoint file, it can be used to create a new output count matrix with a different --fpr, without needing to re-run the lengthy training process.
+# In the log file (lines 13-21), ensure that the numbers of “probable cells”, “additional barcodes”, and “empty droplets” are all nonzero and look reasonable.
+```
+
+# Notice (Check pdf file)
+```{bash}
+############### Top Figure ############### 
+# If you see large downward dips of the ELBO value where it is not monotonically increasing (apart from noise), then try reducing the learning rate by a factor of 2.
+# If the value of the ELBO appears not to have converged to a reasonably stable value, then re-running with more epochs would be recommended. Do not exceed 300, as a rule of thumb.
+
+############### Middle Figure ###############
+# A ranked-ordered total UMI plot along with posterior cell probabilities
+# A converged inference procedure should result in the vast majority of cell probabilities being very close to either zero or one. (Red color plot)
+
+############### Bottom Figure ###############
+# a two-dimensional (PCA) projection of the inferred latent variable z that encodes gene expression in cell-containing droplets.
+# Clusters in z-space often correspond to different cell types. If you see clustering in this plot, this is a good sign.
+# A lack of clustering could be due to a dataset that has only one cell type, or it could indicate QC problems with the dataset. (For instance, if cells were all ruptured, all cells would appear to be the same “type”. This would coincide with difficulties in calling which droplets contain cells.)
+```
+
+
+# Parameter Setting
+```{r}
+# Reference: https://cellbender.readthedocs.io/en/latest/usage/index.html
+
+--epochs: # 150 is typically a good choice. Look for a reasonably-converged ELBO value in the output PDF learning curve (meaning it looks like it has reached some saturating value). It is not advisable to over-train, since this increases the likelihood of over-fitting. (We regularize to prevent over-fitting, but training for more than 300 epochs is too much.)
+
+--expected-cells: # This corresponds to the expected recovered/targeted cells for your experimental design. One way to estimate this is using the cells metric found in the web_summary.html file output by Cell Ranger. Or base this number on the UMI curve. Pick a number where you are reasonably sure that all droplets to the left on the UMI curve are real cells. In this sample case, it is 2000
+
+--cuda: # Include this flag. The code is meant to be run on a GPU.
+--learning-rate: # The default value of 1e-4 is typically fine.
+--fpr: # A value of 0.01 is the default, and represents a fairly conservative setting, which is appropriate for most analyses. In order to examine a single dataset at a time and remove more noise (at the expense of some signal), choose larger values such as 0.05 or 0.1. Bear in mind that the value 1 represents removal of (nearly) every count in the dataset, signal and noise.
+--total-droplets-included: # Choose a number that goes a few thousand barcodes into the “empty droplet plateau”. Include some droplets that you think are surely empty. But be aware that the larger this number, the longer the algorithm takes to run (linear). See the UMI curve below, where an appropriate choice would be 15,000. Every droplet to the right of this number on the UMI curve should be surely-empty. (This kind of UMI curve can be seen in the web_summary.html output from cellranger count. In this sample case, it is 10000.
+```
+
+# Run cellbender (second time)
+```{bash}
+cellbender remove-background --cuda --input raw_feature_bc_matrix.h5 --output background_removed_output_file.h5 --expected-cells 2000 --total-droplets-included 10000
+```
+
+_____________________________________________________________
+
+# Next Step: Use scCustomize for making the output of CellBender be available for Seurat

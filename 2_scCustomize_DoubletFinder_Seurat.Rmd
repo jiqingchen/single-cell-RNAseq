@@ -1,0 +1,254 @@
+---
+title: "scCustomize_DoubletFinder_Seurat"
+author: "Ji-Qing Chen"
+date: "2024-04-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(magrittr)
+library(patchwork)
+library(viridis)
+library(Seurat)
+library(scCustomize)
+library(qs)
+library(DoubletFinder)
+```
+
+# Reference
+```{r}
+# https://samuel-marsh.github.io/scCustomize/articles/Cell_Bender_Functions.html#:~:text=The%20output%20from%20CellBender%20is,file%20contains%20no%20name%20prefix).
+
+# https://www.youtube.com/watch?v=NqvAS4HgmrE&list=PLJefJsd1yfhagnkss5B1YCsHaH0GWQfFT&index=5
+
+# Github for DoubletFinder
+# https://github.com/chris-mcginnis-ucsf/DoubletFinder
+```
+
+# Load CellBender h5 output
+```{r}
+cell_bender_mat <- Read_CellBender_h5_Mat(file_name = "/Users/chenjiqing/Public/scRNA_seq/background_removed_output_file_filtered.h5")
+
+# scCustomize also contains two wrapper functions to easily read multiple CellBender files stored either in single directory or in multiple sub-directories Read_CellBender_h5_Multi_File and Read_CellBender_h5_Multi_Directory
+```
+
+# Create Seurat Object
+```{r}
+# cell_bender_seurat <- CreateSeuratObject(counts = cell_bender_mat, names.field = 1, names.delim = "_")
+cell_bender_seurat <- CreateSeuratObject(counts = cell_bender_mat)
+str(cell_bender_seurat)
+
+# For merged CellBender matrices, you can also use the same function.
+
+# nFeature_RNA: genes
+# nCount_RNA: molecules detected / transcripts
+```
+
+# What are doublets?
+```{r}
+# Sometimes there are multiple cells encapsulated in a droplet with a gel bead. this is what we refer to as doublets and these are considered as technical artifacts which need to be filtered out. Having them in the data can lead to false inferences.
+
+# Homotypic doublets: doublets derived from transcriptionally similar cells
+# Heterotypic doublets: doublets derived from transcriptionally distinct cells
+
+# doubletFinder is more sensitive to heterotypic doublets and it is less sensitive to detecting homotypic doublets.
+```
+
+# 3 parameters to make doublet predictions
+```{r}
+# pN: the number of artificial doublets. The performance of doubletFinder is not dependent on the pN so they set the default value as 0.25 or 25 percent.
+# pK: the neighborhood size used to compute the number of artificial nearest neighbors. doubletFinder performance is highly dependent on the pK parameter. So it is essential for us to find the optimal pK value and use that to identify the proportions of nearest artificial nearest neighbors for each cell.
+# Exp: the number of expected real doublets (We can get this info from the user guides of the reagent kits from 10x genomics.)
+```
+
+# Notice
+```{r}
+# DoubletFinder not to be applied on aggregated scRNA-seq data
+
+# Not preferable to run on merge data (different samples may have different proportions of cell types and merged objects can be large in size).
+
+# Should be run on distinct samples separately.
+
+# Input data should be cleared of low-quality cells.
+
+# Remove clusters with low RNA UMIs, high mitochondrial read %, and uninformative marker genes.
+```
+
+# QC and Filtering
+```{r}
+# Check our Meta data
+View(cell_bender_seurat@meta.data)
+
+# The poor quality cell has low number of genes or low number of molecules 
+
+# Filter out higher mitochondrial gene contamination
+# Calculate the percentage of mitochondrial gene found in each cell
+cell_bender_seurat$mitoPercent <- PercentageFeatureSet(cell_bender_seurat, pattern = "^MT-") 
+# Calculate the percentage starting with "MT" and save it into variable called mitoPercent.
+View(cell_bender_seurat@meta.data) # Check data again
+VlnPlot(cell_bender_seurat, features = c("nFeature_RNA", "nCount_RNA", "mitoPercent"), ncol = 3) # Visualize 3 features together
+FeatureScatter(cell_bender_seurat, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") +
+  geom_smooth(method = "lm")
+# Visualize 2 features in same plot; good quality cells should not only have good number of genes detected but also good number of molecule detected as well.
+# the good quality dataset should follow the straight line; in this case, the majority of cells follows the straight line except the later on cells flatter of it. Should not see cells in the low-right corner of plot which indicates your experiment has only capture of few number of genes and those genes are sequenced over and over again, hence, you see the higher number of transcript counts.
+# For top-left corner, your experiment captures high number of genes but not being sequenced enough.
+# Should fiter out those cells for the downstream analyses.
+# Some cases need to filter out ribosomal genes
+
+
+# Filtering ------------------------------------------
+cell_bender_seurat <- subset(cell_bender_seurat, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & mitoPercent < 10) # can change parameters based on your condition
+```
+
+# Normalize Data
+```{r}
+# In order for us to be able to compare the gene expression across multiple cells, we need to normalize data. Divided gene expression measurements each cell by total expression, multiply by scaling factor and log transformation. --> in order for us to get the expression measurement in relative measures so that makes comparison across different cells.
+cell_bender_seurat <- NormalizeData(cell_bender_seurat)
+
+# check the command you run on your object after filtering. @ commands
+str(cell_bender_seurat)
+```
+
+# Identify the highly variable features (we can focus on these subset of genes in your downstream analysis; hightlight the biological signals in the single cell dataset.)
+```{r}
+cell_bender_seurat <- FindVariableFeatures(cell_bender_seurat, selection.method = 'vst', nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(cell_bender_seurat), 10)
+top10
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(cell_bender_seurat)
+LabelPoints(plot = plot1, points = top10, repel = TRUE) # Label top 10 genes. Variable count is based on the nfeatures you set in the FindVariableFeatures()
+```
+
+# Scaling (a linear transformation)
+```{r}
+# a standard pre-processing step prior to dimensional reduction techniques like PCA.
+# - shifts the expression of each gene, so that the mean expression across cells is 0
+# - scales the expression of each gene, so that the variance across cells is 1
+# this step gives equal weight in downstream analyses, so that highly-expressed genes do not dominate
+
+all.genes <- rownames(cell_bender_seurat)
+cell_bender_seurat <- ScaleData(cell_bender_seurat, features = all.genes)
+# the default in ScaleData() is only to perform scaling on the previously identified variable features (2,000 by default). And it will make this step faster.
+# In here, our PCA and clustering results will be unaffected if we use all.genes. However, Seurat heatmaps (produced as shown below with DoHeatmap()) require genes in the heatmap to be scaled, to make sure highly-expressed genes don’t dominate the heatmap. To make sure we don’t leave any genes out of the heatmap later, we are scaling all genes in here.
+# If we want to scale on the previously identified 2000 variable features, we can simply omit the features argument in the previous function call.
+
+# Remove unwanted sources of variation (might be from technical noise [might be from batch effect]  or biological sources[differences in cell cycle of these cells]) --> downstream analysis, our cells could not cluster due to these variations. We could ‘regress out’ heterogeneity associated with (for example) cell cycle stage, or mitochondrial contamination. This feature can be achieved by specifying vars.to.regress:
+# Ex: cell_bender_seurat <- ScaleData(cell_bender_seurat, vars.to.regress = "mitoPercent")
+```
+
+# Difference between @counts, @data and @scale.data slots
+```{r}
+str(cell_bender_seurat)
+# $counts: Raw sparse matrix; will be read in the first step
+# $data: log normalized counts. Result of NormalizeData() will be stored in here.
+# $scale.data: scaled data. Result of ScaleData() will be stored in here.
+```
+
+# Perform linear dimensional reduction
+```{r}
+# To identify the sources of heterogeneity in a dataset
+
+# By default, only the previously determined 2000 variable features are used as input [VariableFeatures(object = cell_bender_seurat)] , but can be defined using features argument if you wish to choose a different subset.
+cell_bender_seurat <- RunPCA(cell_bender_seurat, features = VariableFeatures(object = cell_bender_seurat), verbose = FALSE)
+
+# Visualize PCA results
+print(cell_bender_seurat[["pca"]], dims = 1:5, nfeatures = 5) # Show only the first 5 PC but only first top 5 features having the positive and negative PC scores.
+
+# Seurat provides several useful ways of visualizing both cells and features that define the PCA; DimHeatmap() allows for easy exploration of the primary sources of heterogeneity in a dataset, and can be useful when trying to decide which PCs to include for further downstream analyses.
+# Both cells and features are ordered according to their PCA scores.
+# Setting "cells" to a number plots the ‘extreme’ cells on both ends of the spectrum
+DimHeatmap(cell_bender_seurat, dims = 1, cells = 500, balanced = TRUE) # shows the features with high heterogeneity
+
+# Determine dimensionality of the data (use only those statistically significant PCs which capture the majority of signals in downstream analyses)
+ElbowPlot(cell_bender_seurat) # after 15, no valid good differences in percentage variance explained. So for the downstream analyses, only consider all PCs up to PC15
+```
+
+# Cluster cells together
+```{r}
+# Cluster similar cells which have similar feature expression patterns in the low dimensional space
+cell_bender_seurat <- FindNeighbors(cell_bender_seurat, dims = 1:15) # dim: provide the number of PCs that be determined to capture the most variation in our dataset.
+
+cell_bender_seurat <- FindClusters(cell_bender_seurat, resolution = c(0.1, 0.3, 0.5, 0.7, 1)) # resolution: granularity of the cluster; the lower number the fewer clusters; the higher number the more clusters; Find which one is best to separate out your cells into distinct clusters.
+
+View(cell_bender_seurat@meta.data)
+
+DimPlot(cell_bender_seurat, group.by = "RNA_snn_res.0.1", label = TRUE) # check the result of resolution = 0.1
+# Try to avoid the result with some clusters overlapping to each other (similar cells to be separated out to different clusters), for example resolution = 1 is bad because cluster 0, 4, 8, 10 are overlapping to each other.
+
+# Set identity of clusters
+Idents(cell_bender_seurat) <- "RNA_snn_res.0.1" # if you don't do this step, the identity would be the default resolution; so I used the cluster in the "RNA_snn_res.0.1" column from my meta.data
+Idents(cell_bender_seurat)
+
+# Noe-linear dimensionality reduction (UMAP and t-SNE)
+cell_bender_seurat <- RunUMAP(cell_bender_seurat, dims = 1:15)
+DimPlot(cell_bender_seurat, reduction = 'umap')
+```
+
+_______________________________________
+
+# Optimal Parameters Identification of DoubletFinder (no ground-truth strategy)
+```{r}
+# paramSweep() introduces artificial doublets in varying proportions merges with a real data set and pre-process the data set and  calculate the proportion of artificial nearest  neighbors for varying neighborhood sizes. And it provides us a list of the proportion of artificial nearest neighbors for varying combinations of the pN and the pK.
+sweep.res.list <- paramSweep(cell_bender_seurat, PCs = 1:15, sct = FALSE)
+
+# summarizeSweep() summarizes the results from the paramSweep
+sweep.stats <- summarizeSweep(sweep.res.list, GT = FALSE)
+
+# find.pK(): computes a metric by which we can find the optimal pK value. It computes a mean variance normalized by modality coefficient and the highest value of that corresponds to the optimal pK value.
+bcmvn <- find.pK(sweep.stats) # return a plot and the table that has various measurements of the mean and the variance of the bimodality coefficients.
+
+# Create a similar plot so I can see the values on the x-axis
+ggplot(bcmvn, aes(pK, BCmetric, group = 1)) +
+  geom_point() +
+  geom_line()
+# the pK value corresponding to the highest BCmetric value is our optimal pK value. In here, it is 0.13
+
+# Programmatically storing the optimal pK value to a pK variable.
+pK <- bcmvn %>%
+  filter(BCmetric == max(BCmetric)) %>%
+  select(pK)
+pK <- as.numeric(as.character(pK[[1]]))
+
+# Homotypic Doublet Proportion Estimate
+annotations <- cell_bender_seurat@meta.data$RNA_snn_res.0.1
+# modelHomotypic() which models the proportion of homotypic doublets based on the user provided annotations (cell slusters).
+homotypic.prop <- modelHomotypic(annotations)
+# Based on the number of cells we had loaded and the number of cells we recovered. the estimated doublet rate in a 10X Genomics single cell experiment: https://uofuhealth.utah.edu/huntsman/shared-resources/gcb/htg/single-cell/genomics-10x
+# Function for calculating the doublet rate: https://currentprotocols.onlinelibrary.wiley.com/doi/full/10.1002/cpz1.963
+nExp_poi <- round(0.031*nrow(cell_bender_seurat@meta.data)) # expected number of doublets
+nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop)) # Expected number of doublets after being adjusted for the Homotypic Doublets
+```
+
+# Run doubletFinder
+```{r}
+cell_bender_seurat.filtered <- doubletFinder(cell_bender_seurat, 
+                                             PCs = 1:15, 
+                                             pN = 0.25, 
+                                             pK = pK, 
+                                             nExp = nExp_poi.adj,
+                                             reuse.pANN = FALSE, sct = FALSE)
+# reuse.pANN: we don't have previously generated pANN results so we set False in our initial doubletFinder run.
+# sct: We haven't used sct transformed in our pre-processing steps we will set this parameter to false.
+View(cell_bender_seurat.filtered@meta.data)
+
+# visualize doublets
+DimPlot(cell_bender_seurat.filtered, reduction = 'umap', group.by = "DF.classifications_0.25_0.13_25")
+
+# number of singlets and doublets
+table(cell_bender_seurat.filtered@meta.data$DF.classifications_0.25_0.13_25)
+
+# We should filter out the doublet before performing some downstream analysis.
+Idents(cell_bender_seurat.filtered) <- "DF.classifications_0.25_0.13_25"
+cell_bender_seurat.filtered.singlet <- subset(cell_bender_seurat.filtered, idents = "Singlet")
+DimPlot(cell_bender_seurat.filtered.singlet, reduction = 'umap', group.by = "RNA_snn_res.0.1")
+
+# Save
+save(cell_bender_seurat.filtered.singlet, file = "/Users/chenjiqing/Public/scRNA_seq/Seurat_filtered_singlet.RData")
+```
+
