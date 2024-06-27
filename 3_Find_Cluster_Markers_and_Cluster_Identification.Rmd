@@ -1,0 +1,152 @@
+---
+title: "3_Find_Cluster_Markers_and_Cluster_Identification"
+author: "Ji-Qing Chen"
+date: "2024-05-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(tidyverse)
+```
+
+# Questions: 
+```{r}
+# https://www.youtube.com/watch?v=1i6T9hpvwg0&list=PLJefJsd1yfhagnkss5B1YCsHaH0GWQfFT&index=8
+
+# I have few clusters and I want to compare between the clusters and want to identify genes differentially expressed in one cluster versus the other group of clusters. --> findMarkers(): find markers between specific clusters
+
+# I want to identify the cell types in my clusters; what does the each cluster what is the identity of each cluster. Identify the markers that are highly expressed for each cluster. Compare your each cluster versus all the other clusters. --> findAllMarkers(): Find markers in a cluster compared to all other clusters. Give you the genes that are differentially expressed in one cluster versus the other so you can identify markers for each cluster. These markers will help you identify what are the cell types that form that cluster.
+
+# Where we have data from two conditions and we have cells present in both those conditions. Two cell types (clusters) and each type has two different condition, control and treated. What is the identity of each cluster (meaning what are the cell types that form each cluster)? What are the differentially expressed genes in cell type A (in cluster formed by cell type A) between control and treated condition. --> findConservedMarkers(): Find Markers conserved across conditions; Internally separates out our cells according to condition. Separates out cells according to the treated condition and the control condition. Identify genes that are differentially expressed in the cluster in question when it is compared to all the other clusters. So it does that for the treated and control cells. Finally, we have two separate lists of differentially expressed markers which are combined and returned to us as one list of differentially expressed genes which separates out a cell type from the other cell types (clusters); and these markers are essentially not differentially expressed due to difference in condition but due to difference in the cell type. If interested in finding the differentially expressed genes between one cell type but between different conditions then we can perform that using one of the function that I mentioned here.
+```
+
+# Load Data
+```{r}
+# Data From: https://drive.google.com/file/d/13I2250SX-vQfV41th0JmF6BIyx0FGjzO/view
+# Credit: https://www.youtube.com/watch?v=zEuqhiu341I&list=PLJefJsd1yfhagnkss5B1YCsHaH0GWQfFT&index=6
+
+ifnb_harmony <- readRDS('/Users/chenjiqing/Public/scRNA_seq/ifnb_harmony.rds')
+str(ifnb_harmony)
+View(ifnb_harmony@meta.data)
+```
+
+# visualize data
+```{r}
+clusters <- DimPlot(ifnb_harmony, reduction = 'umap', group.by = 'seurat_clusters', label = TRUE)
+condition <- DimPlot(ifnb_harmony, reduction = 'umap', group.by = 'stim') # Based on the treatment condition
+
+condition|clusters # You can see that each cluster contains cells from both the conditions
+
+# Goal: We want to annotate and identify the cell types that from each cluster (right plot).
+```
+
+# FindAllMarkers() (One of the method of Identifying the cell types that from each cluster;Appropriate for data where we have data from just one condition one group;NOT applicable to this scenario where we have data from two conditions and we have cells present in both the conditions)
+```{r}
+FindAllMarkers(ifnb_harmony, # must be RNA assay; use DefaultAssay() to check
+               logfc.threshold = 0.25,
+               min.pct = 0.1,
+               only.pos = TRUE,
+               test.use = 'DESeq2',
+               slot = 'counts') # because the DESeq2 uses the raw counts
+# logfc.threshold: minimal log2 fold change average expression of the gene in the cluster you are trying to compare relative to average expression of the gene and all the other clusters combined.
+
+# min.pct: it will only test those genes that are detected at a minimum fraction of the number of cells in either of the two populations.For example, if we set as 0.5, it will only detect those genes and it will only test those genes rather that are detected at 50% (little stringent but speed up the process of finding the markers but you lose a lot of markers that are not detected in that many percentage of the fraction of cells) frequency in either of two clusters or the two populations that we are trying to compare.
+
+# only.pos: return only positive markers that are up regulated. If we wish to have both the up-regulated and the down-regulated markers then we set it to false.
+
+# test.use: provides you with a lot of options for the test, such as Wilcox, poisson, t-test, or external packages...
+
+# We don't need to specify the cluster here because it iteratively compares each cluster to every other cluster so we do not need to provide any cluster information here.
+
+DefaultAssay(ifnb_harmony)
+# If you have used any other integration methods, then your default assay may be different. You can set it to RNA: DefaultAssay(ifnb_harmony) <- 'RNA'
+```
+
+# findConservedMarkers(): is more applicable to a scenario where we have data from two conditions and we have cells present in both the conditions.
+```{r}
+# Example (based on previous plot): Identify what cluster 3 is so this is going to be my ident 1 because this is the first cluster I want to identify and I want to compare the cluster 3 with all the other clusters because I want to essentially get the markers that are up-regulated or expressed in cluster 3 which will help me identify what this cluster is what the cells in this cluster are what are the type of cells that form this cluster.
+markers_cluster3 <- FindConservedMarkers(ifnb_harmony,
+                                         ident.1 = 3, # the cluster you want to identify
+                                         grouping.var = 'stim')
+# Not use ident.2 in here because I am not specifically comparing between two clusters. Ex. if I am comparing between cluster 3 and 11, ident.2 will be cluster 11. Since I want all the other clusters to be compared with 3 so I will not specify ident.2.
+
+# grouping.var: in this case, grouping the cells by "stim" which has the information on the control or stimulated condition.
+
+# Check markers
+head(markers_cluster3)
+# We can see statistics being calculated for the both groups (control and stimulated). Internally separates out cells by condition. It separated out the cells by condition and for each condition it compared the cluster 3 to all the other clusters.
+
+# In FCGR3A, positive CTRL_avg_log2FC: up-regulated by this much fold change in cluster 3 compared to all the other clusters. This gene is detected in 97 percent of the cells in cluster 3 compared to 20 percent of the cells in all the other clusters combined
+```
+
+# visualize top features
+```{r}
+FeaturePlot(ifnb_harmony, features = c('FCGR3A'), min.cutoff = 'q10') # 'q10': 10th quantile
+# min.cutoff: is the expression cutoff so for cells where the expression for the gene "FCGR3A" is lower than this value the cells will be in grey in the plot. If the expression for the gene "FCGR3A" in the cells is greater than the q10, then cells will be in varying proportions of purples. 
+# So the min.cutoff value is playing the contrast of the data set playing with the scale. It will not be filtering out any cells or removing any cells but it just plays with the scales and playing with the contrast used to color the cells.
+```
+
+# rename ident of my cell from cluster-3 to CD16 monocytes because FCGR3A is a marker for CD16. So the cells in cluster 3 are CD16 Monocytes.
+```{r}
+# Take a look at our idents. Idents is nothing but how our cells are identified by. The default identity of our cells are set to the cluster number. 
+Idents(ifnb_harmony)
+
+ifnb_harmony <- RenameIdents(ifnb_harmony, `3` = 'CD16 Mono')
+
+# There are various marker databases where you can go to find a markers for your specific cell types:
+# 1. SCSig: https://www.gsea-msigdb.org/gsea/msigdb/supplementary_genesets.jsp
+# 2. PangloDB: https://panglaodb.se/
+# 3. CellMarker: http://bio-bigdata.hrbmu.edu.cn/CellMarker/
+# 4. Tabula Muris (for mouse): https://tabula-muris.ds.czbiohub.org/
+
+DimPlot(ifnb_harmony, reduction = 'umap', label = T)
+
+# For the rest clusters, write a loop where it will iteratively take a cluster and compare it with the rest of the clusters.
+
+# For now the metadata already have the cell annotation (cells have already been assigned to a cell type). See ifnb_harmony@meta.data$seurat_annotations, however, this is not the case in a real world scenario. In real-world scenario you will not be provided with the data with cells completely annotated.
+```
+
+# Settings cluster identities
+```{r}
+# Settings cluster identities is an iterative step
+# multiple approaches could be taken - automatic/manual anotations (sometimes both)
+# need to make sure each cell type forms a separate cluster
+
+# setting Idents as Seurat annotations provided (also a sanity check!)
+Idents(ifnb_harmony) <- ifnb_harmony@meta.data$seurat_annotations
+Idents(ifnb_harmony)
+
+DimPlot(ifnb_harmony, reduction = 'umap', label = TRUE)
+# We can see that each cell belongs to a specific cell type cluster so we see that each cluster has a specific name which is the type of the cell that the cluster is composed of.
+```
+
+# findMarkers between conditions; Identify genes that are differentially expressed between conditions in a particular cell types.
+```{r}
+# Example: we want to look at the changes in the gene expression patterns of CD16 Mono after interferon beta treatment. We need to change labeling of cells before analysis (split cluster into control and stimulated/ label of all the cells according to what condition they belong with the type of the cells).
+ifnb_harmony$celltype.cnd <- paste0(ifnb_harmony$seurat_annotations,'_', ifnb_harmony$stim) # Create additional column that along with the type of the cell; we also concatenated information on whether the cell belongs to the control group or the stimulated group
+View(ifnb_harmony@meta.data)
+Idents(ifnb_harmony) <- ifnb_harmony$celltype.cnd
+
+DimPlot(ifnb_harmony, reduction = 'umap', label = TRUE)
+```
+
+# To compare the cells of the same cell type between condition we will use a function FindMarkers()
+```{r}
+b.interferon.response <- FindMarkers(ifnb_harmony, ident.1 = 'CD16 Mono_STIM', ident.2 = 'CD16 Mono_CTRL')
+
+head(b.interferon.response)
+# These are the genes that are up-regulated in a stimulated group vs the control group in CD16 Mono
+
+# plotting conserved features [FindConservedMarkers()] vs DE features between conditions [FindMarkers()]
+head(markers_cluster3)
+
+FeaturePlot(ifnb_harmony, features = c('FCGR3A', 'AIF1', 'IFIT1'), split.by = 'stim', min.cutoff = 'q10')
+# FCGR3A and AIF1 from FindConservedMarkers(); IFIT1: top result from the FindMarkers()
+
+# The first two markers show high level of expression in cluster 3 compared to the rest of clusters.
+# The last feature/marker shows that it is highly expressed in all the cells in the stimulated group compared to the control group. Interferon beta treatment causes the IFIT1 not only to be up-regulated in cluster 3 but in all the other cell type compared to the control group.
+# FindConservedMarkers() identifies markers which are up-regulated in one cluster compared to the other regardless of the condition whereas FindMarkers() specifically compares between the conditions and provides us with genes that are up-regulated in response to treatment.
+```
+
