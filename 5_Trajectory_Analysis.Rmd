@@ -1,0 +1,338 @@
+---
+title: "5_Trajectory_Analysis"
+author: "Ji-Qing Chen"
+date: "2024-07-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(1234)
+
+library(monocle3)
+library(SeuratWrappers)
+library(Seurat)
+library(ggplot2)
+library(tidyverse)
+
+# Credit: https://www.youtube.com/watch?v=iq4T_uzMFcY&list=PLJefJsd1yfhagnkss5B1YCsHaH0GWQfFT&index=10
+
+# devtools::install_github('cole-trapnell-lab/monocle3')
+# If not able to install from Github: use Sys.getenv("GITHUB_TOKEN") ; Sys.getenv("GITHUB_PAT") ; gitcreds::gitcreds_get() ; gitcreds::gitcreds_get()$password to check where the token is coming from, and then remove it using gitcreds::gitcreds_delete(). After that, try to install package again.
+```
+
+# What is pseudotime analysis?
+```{r}
+# When studying dynamic cellular process like cell differentiation or cellular response to a certain stimulus, cells transition from one functional state to another.
+
+# When these cells move between states there is a lot happening at the transcription level meaning there are certain cells set of genes that are activated during the earlier states and there are certain genes that are activated during the later stage.
+
+# Instead of purifying cells into discrete states experimentally which is also challenging to do at times.
+
+# What Monocle3 does is that it uses an algorithm to learn the sequence of gene expression changes. Each cell must go through as a part of dynamic biological process. So basically it learns based on  the gene expression patterns whether the cell belongs to an earlier state an intermediate state or at a later stage. 
+# So once it has learned a trajectory of gene expression changes, Monocle can essentially place each cell at its appropriate position in the trajectory. 
+# And if there are multiple outcomes for the process Monaco will construct a branch trajectory where each branch would correspond to a cellular decision and Monocle provides us with powerful tools to identify genes that are affected by these decisions and also the genes that are involved in making these decisions.
+```
+
+# What is pseudotime?
+```{r}
+# We measure the progress of an individual cell through a process using a numeric value which has arbitrary units and we call it pseudo-time. 
+
+# So pseudo-time essentially measures how far a particular cell is within a dynamic process. So cells in the earlier state would have smaller pseudo-time and cells in the later state or intermediate or later state will have like higher pseudo-time. 
+
+# So by ordering the cells according to pseudo-time becomes possible to define the different transition states through which a cell progresses during its dynamic process.
+```
+
+# WHEN to perform trajectory analysis?
+```{r}
+# Study biological processes like mechanisms that play a role in development of resistance to a therapy or studying immune responses, or rare cell populations or understanding cellular heterogeneity in your data or to even understand clonal evolution and the role of micro-environment in cancer.
+
+# Assumptions: 
+# - the process that you're trying to study is dynamic process 
+# - you have prior knowledge and evidence that a trajectory exists in your data 
+# - you're ensuring that appropriate cells are sampled 
+# - the data is sampled to sufficient depth so that you're ensuring the presence of transition states in your data
+
+# If you're examining a stem cell differentiation data set then trajectory analysis seems to be the logical thing to do but if you see your data being clustered as distinct clusters and the cell-types are not known to be associated by any known biological process the trajectory analysis may not be appropriate 
+
+# Looking at t-SNE and UMAP plots can also be sometimes useful to decide whether a trajectory analysis should be performed.
+```
+
+# WHICH trajectory inference method to choose?
+```{r}
+# whether you expect disconnected trajectories in your data
+# do you have prior knowledge or do you require prior knowledge to run the method
+# do you expect any particular topology in the data
+# whether the tool is user friendly 
+# whether it's compatible with the system that you're using as well as with the other packages that you use to pre-process your data
+# performance of the tool
+
+# dynverse is a collection of R packages which provides various functions to perform trajectory analysis so it not only allows us to perform the trajectory analysis but it also provides us with an R shiny app that allows user to decide which method is more appropriate for their own data set. So it asks a bunch of questions and suggests you the methods which are most appropriate to be used for your data in addition to that also tells you the amount of time and memory that will be required to process and build a trajectory for your data set.
+# https://dynverse.org/
+```
+
+# cell_data_set class
+```{r}
+# Monocle 3 requires data to be in the form of a cell_data_set now cell
+
+# cell_data_set object is derived from the single cell experiment class basically these objects are slightly different from the Seurat object.
+
+# Monocle 3 takes the count matrix produced by CellRanger pipeline which is often used to analyze experiments from 10x genomics instruments 
+# Basically, this cell_data_set requires three input files the first is expression matrix which is essentially a count matrix where rows are genes and the columns are cells. Second, it requires a cell metadata which is essentially a data frame where rows are cells and the columns are attributes like cell types culture conditions or the day capture. Third, it requires the gene metadata which has information about the gene (a data frame) where rows are genes and the columns are attributes about the genes like GC content of the gene and more information about the gene.
+```
+
+# Data for this Demo
+```{r}
+# Publication: https://academic.oup.com/nsr/article/8/3/nwaa180/5896476?login=false
+
+# We will be using is a transcriptomic landscape of human blood cells. 
+
+# These are essentially 7551 human blood cells covering 32 cell types from 21 healthy donors 
+
+# But today we will not be using the entire data set we are just choosing a group of B cells and its progenitors which are around 1400 cells.
+
+# Source: http://scrna.sklehabc.com/   ---> Download ---> Gene expression matrix, Marker information, and Cell metadata.
+
+# read in data for cell_data_set object
+markers <- read.delim('/Users/chenjiqing/Public/scRNA_seq/ABC_Marker.txt', header = T) # gene metadata
+cell.metadata <- read.delim('/Users/chenjiqing/Public/scRNA_seq/ABC_Meta.txt', header = T) # cell metadata
+expr.matrix <- read.delim('/Users/chenjiqing/Public/scRNA_seq/ABC_umi_matrix_7551_cells.csv', header = T, sep = ',') # expression matrix (need to be transposed later since we want rows as gene names and columns as cell IDs)
+# or
+load("/Users/chenjiqing/Public/scRNA_seq/TI_monocle3_files.RData")
+```
+
+# Create and filter seurat object
+```{r}
+# transpose expression matrix
+expr.matrix.t <- t(expr.matrix) 
+
+# Create seurat object
+seu.obj <- CreateSeuratObject(counts = expr.matrix.t) 
+View(seu.obj@meta.data)
+
+# add additional metadata here which includes the annotation and a bunch of information that we have in the cell metadata
+rownames(cell.metadata) <- cell.metadata$cell_id
+seu.obj <- AddMetaData(seu.obj, metadata = cell.metadata)
+View(seu.obj@meta.data)
+
+# Calculate the percentage of reads that map to mitochondrial genes
+seu.obj$mitopercent <- PercentageFeatureSet(seu.obj, pattern = '^MT-')
+
+# Filtering
+seu.obj.filtered <- subset(seu.obj, subset = nCount_RNA > 800 &
+                           nFeature_RNA > 500 &
+                           mitopercent < 10)
+```
+
+# Subset my Seurat object make it only contains B cells
+```{r}
+# Check the population
+unique(seu.obj.filtered@meta.data$population)
+# [1] "sp" "t"  "mo" "nk" "e"  "b"  "n" : stem cell progenitor cell, T cells, Monocytes, NK cells, erythrocytes, B cells, or Neutrophils.
+
+# Change the identity to population (because I want all my cells to either be labeled according to what group it belongs to --> easy for us to subset)
+Idents(seu.obj.filtered) <- seu.obj.filtered$population
+
+# Subset --> only contain B cells
+b.seu <- subset(seu.obj.filtered, idents = "b")
+b.seu
+
+# Check
+unique(b.seu@meta.data$redefined_cluster)
+# Among the b cell populations are in various stages right from the progenitor b cells to more mature b cells so this would be an ideal data set to perform trajectory analysis because we have not only the start and the end state but we also have the intermediate stages of a cell which will help us construct our trajectory and also take a look at genes that change along the trajectory.
+```
+
+# Pre-processing using Seurat
+```{r}
+b.seu <- NormalizeData(b.seu)
+b.seu <- FindVariableFeatures(b.seu)
+b.seu <- ScaleData(b.seu)
+b.seu <- RunPCA(b.seu)
+b.seu <- FindNeighbors(b.seu, dims = 1:30)
+b.seu <- FindClusters(b.seu, resolution = 0.9)
+# Trajectory analysis is heavily dependent on the topology of the data and the topology is determined by the clustering so it is very important that you cluster your data using the optimal resolution making sure that each cell type groups together as distinct clusters and similar groups of cells do not get clubbed together in one cluster because this might be important as there might be transition states of cells which could be easily grouped together. 
+# Make sure you're using the optimal resolution to cluster your data.
+
+b.seu <- RunUMAP(b.seu, dims = 1:30, n.neighbors = 50)
+# Setting n.neighbors to 50 gives me a nicer grouping overall.
+
+# Visualization
+a1 <- DimPlot(b.seu, reduction = 'umap', group.by = 'redefined_cluster', label = T)
+a2 <- DimPlot(b.seu, reduction = 'umap', group.by = 'seurat_clusters', label = T)
+a1
+# Although I do see some amount of overlaps between some cell types but I think some major cell types like Pro-B, Cycling Pre-B, Memory, and plasma cells are grouped into separate clusters.
+# I recommend you to play around with resolutions when you're clustering your data to ensure that you do not over cluster or under cluster your data but make sure that the major cell types in your data do a group together into distinct clusters.
+a2
+a1|a2
+```
+
+# Monocle3 workflow
+```{r}
+# Monocle3 requires cell_data_set object
+# convert seurat object to cell_data_set object for Monocle3
+
+cds <- as.cell_data_set(b.seu)
+cds
+# SeuratWrappers has a function called as.cell_data_set which can convert the Seurat object into an object of cell_data_set class.
+
+
+###################### The way you retrieve certain information is different than how you do it in Seurat: ######################
+# to get cell metadata
+colData(cds)
+# to gene metdata
+fData(cds) # it only has many rows but no columns (the row names are the genes). It requires a column called gene_short_name.
+rownames(fData(cds))[1:10]
+# since it misses the gene_short_name column, let's add it
+fData(cds)$gene_short_name <- rownames(fData(cds))
+fData(cds) # You have the row names as the genes but you also have another column called gene_short_name with the same names that is the gene names.
+
+# to get counts
+counts(cds)
+# it will provide you with the sparse matrix of genes as rows the columns as cell IDs and the numbers as the counts.
+```
+
+# To build a trajectory, we want Monocle 3 to use the clustering we previously performed in Seurat
+```{r}
+# Monocle 3 also has functions to cluster cells where it not only determines the clusters but also partitions which are nothing but these are super clusters.
+
+# Need to retrieve clustering information and store it inside appropriate locations in the cell_data_set
+
+# Essentially we need to change three things: 
+# - 1. need to add the partition information 
+# - 2. need to add the clustering information from Seurat
+# - 3. UMAP cell embeddings which are UMAP coordinates
+
+###################### 1. assign partition ######################
+# Show where the cluster information is stored inside the cds object
+cds@clusters$UMAP$partitions
+
+# we want to assign all the cells to one partition. The way we do that is we need to create a named vector or a named list. For the named list, the names should be the cell IDs and the value should be the partition values which is 1.
+reacreate.partition <- c(rep(1,length(cds@colData@rownames))) # creating a vector of the values. We see 1 being assigned that many times that is the total number of cells.
+names(reacreate.partition) <- cds@colData@rownames # The names for these values i want it to be the names of the cell IDs
+reacreate.partition <- as.factor(reacreate.partition) # Convert it as factor.
+reacreate.partition # So we can use this name list and assign it to the partition.
+
+cds@clusters$UMAP$partitions <- reacreate.partition # The partition information is stored in cluster slot under UMAP. All the cells are being assigned to one partition that is partition one.
+
+###################### 2. Assign the cluster info ######################
+
+list_cluster <- b.seu@active.ident # We can get the cluster information from Seurat object that is active.ident.
+list_cluster # can see which cell belongs to which cluster
+cds@clusters$UMAP$clusters <- list_cluster # assign this list cluster to the slot within the UMAP clusters in the cell_data_set object
+
+
+###################### 3. Assign UMAP coordinate - cell embeddings ######################
+# where embeddings are saved inside the cell_data_set object.
+View(cds@int_colData@listData$reducedDims) # you will see embeddings for PCA and UMAP so we need to change the embeddings for UMAP.
+
+cds@int_colData@listData$reducedDims$UMAP <- b.seu@reductions$umap@cell.embeddings # Assign UMPA embeddings to the Seurat UMAP embeddings.
+
+
+
+###################### Plots (view all clusters as well as also view the cluster annotations) ######################
+
+# plot_cells is equivalent to DimPlot
+cluster.before.trajectory <- plot_cells(cds,
+           color_cells_by = 'cluster',
+           label_groups_by_cluster = FALSE, # because we want to place only one label at the center of all the cells
+           group_label_size = 5) + # Increase the label size
+  theme(legend.position = "right")
+
+cluster.names <- plot_cells(cds,
+           color_cells_by = "redefined_cluster", # Cluster annotation
+           label_groups_by_cluster = FALSE,
+           group_label_size = 5) +
+  scale_color_manual(values = c('red', 'blue', 'green', 'maroon', 'yellow', 'grey', 'cyan')) +
+  theme(legend.position = "right")
+
+cluster.before.trajectory
+cluster.names
+cluster.before.trajectory | cluster.names
+```
+
+# Learn trajectory graph
+```{r}
+cds <- learn_graph(cds, use_partition = FALSE)
+# If use_partition is set to true then it will use partitions and learn a disjoint trajectory for each partition. We know that all our cells follow one trajectory we will set this to false.
+
+plot_cells(cds,
+           color_cells_by = 'redefined_cluster',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE,
+           group_label_size = 5)
+# All of the cells are connected by one trajectory we do not see any disjointed trajectories.
+# We also see some branch points. A possible explanation could be that when we were grouping assessment we could not distinctly separate out all the cell types into separate clusters and hence we could be seeing these branch points because there could be cells from the later stage or the earlier stage being present and hence the branching is present in the trajectory. But this would make more sense once we know which cells are at the beginning of the trajectory which are at the later stage by ordering these cells in "pseudotime".
+```
+
+# Order the cells in pseudotime
+```{r}
+# Cells which are in the earlier state would have smaller pseudotime and cells which are at the later state will have higher pseudotime.
+
+# Order cells in pseudotime. (function: order_cells())
+# root_cells: we need to tell which other cells which are present at the beginning of the trajectory and this is based on the prior knowledge. Since we have all the B cells here we know that the start point for these cells would be the Pro-B cells.
+# Give the root_cells parameter all the cell IDs that are Pro-B cells. So the Pro-B cells belong to cluster number five
+cds <- order_cells(cds, reduction_method = 'UMAP', root_cells = colnames(cds[,clusters(cds) == 5]))
+
+plot_cells(cds,
+           color_cells_by = 'pseudotime',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE)
+# The Pro-B cells which we provided to the Monocle as root cells have the lowest pseudo time and as cell progresses along the trajectory they have higher and higher pseudotime
+```
+
+# Plotting pseudotime for cell types in ggplot2 (visualize what is the range of pseudotime
+for each type of cell)
+```{r}
+# cells ordered by Monocle3 pseudotime
+
+pseudotime(cds) # get pseudotime values
+cds$monocle3_pseudotime <- pseudotime(cds) # store pseudo time value for each cell in cds
+colData(cds) # check the cell metadata
+data.pseudo <- as.data.frame(colData(cds)) # Convert it into data frame
+
+# see the range of pseudo times for each cell type
+ggplot(data.pseudo, aes(monocle3_pseudotime, reorder(redefined_cluster, monocle3_pseudotime, median), fill = redefined_cluster)) +
+  geom_boxplot()
+# trajectory analysis is now helpful to look at genes that change that expression going from right from the Pro-B cells and until differentiating and ultimately becoming the Plasma B cells
+
+# Next, check which genes are differentially regulated or activated or repressed during the earlier or the later stages of this trajectory.
+```
+
+# Finding genes that change as a function of pseudotime (function: graph_test)
+```{r}
+deg_bcells <- graph_test(cds, neighbor_graph = 'principal_graph', cores = 4)
+# graph_test tests the genes for differential expression based on the low dimension embeddings so basically it uses a test statistics that tells whether the cells at nearby positions on a trajectory will have similar or dissimilar expression levels for the gene that is being tested.
+View(deg_bcells)
+# We want to get only those genes that are significantly differentially expressed and we can filter that using the q values.
+
+# Find the highly significant genes that are differentially expressed
+deg_bcells %>% 
+  arrange(q_value) %>% 
+  filter(status == 'OK') %>% 
+  head() # Just get the top few genes
+# Visualize the highly significant genes (using Seurat object)
+FeaturePlot(b.seu, features = c('DDOST', 'STMN1', 'CD52')) # plot the first 3 genes
+# STMN1 has higher expression when cells are in the earlier stages. CD52 has higher expression when the cells are in the intermediate or more differentiated state.
+
+# These differentially expressed genes can be leveraged to perform pathway analysis or gene set enrichment analysis to understand what pathways are differentially expressed especially when one is trying to study the mechanism of a response to a certain therapy or maybe understanding the mechanism of development of resistance to a therapy.
+```
+
+# Visualizing pseudotime in Seurat as a feature plot
+```{r}
+# Add the pseudotime values to a Seurat object
+b.seu$pseudotime <- pseudotime(cds)
+
+FeaturePlot(b.seu, features = "pseudotime")
+# the cells with the lowest pseudotime are in grey and as and when the pseudotime increases the intensity of the color goes on increasing.
+
+# Change the idents of the Seurat object to have the cluster names
+Idents(b.seu) <- b.seu$redefined_cluster
+# recreate the feature plot with the labels
+FeaturePlot(b.seu, features = "pseudotime", label = T)
+# In addition to just the pseudotime and clusters we also have a cluster label which helps us understand which cells are having the lowest pseudotime and which are the cells having the highest pseudotime.
+```
+
