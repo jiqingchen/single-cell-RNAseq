@@ -1,0 +1,211 @@
+---
+title: "6_Automatic_Cell_Annotation"
+author: "Ji-Qing Chen"
+date: "2024-07-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(SingleR)
+library(celldex) # provides a collection of reference expression data sets with curated cell type labels
+library(Seurat)
+library(tidyverse)
+library(pheatmap)
+```
+
+# Introduction
+```{r}
+# An automatic cell annotation method is used to annotate cells either by comparison of the data with annotated reference data (already well annotated single cell data) or using known marker genes that are indicative of specific cell type.
+
+# Manual annotation confirms or provides further detail for annotated cells or clusters or identifies a cell type of unlabeled clusters.
+
+# Ex. we have used annotated reference data set to transfer the labels or use that as a reference to identify the cell types in our data set or the query data set there might be some cells which are unlabeled because these would could be the cells that are not present in the reference data set and that can be resolved or can be identified by manual annotation or using other approaches like marker based identification. - Cell types can be manually annotated or can be used in combination of marker genes pathway analysis or differentially expressed genes with known functional information.
+
+# These cell annotations are often verified using independent sources such as new validation experiments or comparison to complementary data such as spatial transcriptomics data.
+```
+
+# Strategies for automatic cell annotation
+```{r}
+############################# A. Marker based annotation #############################
+# labels cells or cell clusters on the basis of characteristic expression of known marker genes.
+# the known relationships between the marker genes and the cell types can be obtained from:
+# ------- MsigDB
+# ------- PanglaoDB
+# ------- CellMarker
+# ------- Manually from the literature
+
+############################# B. Reference based annotation approach #############################
+# Transfers the label from a reference cell or clusters (from an expertly annotated single cell data) to a sufficiently similar one in the query data set that is to be annotated.
+# The sources for reference single cell data can be:
+# ------- Gene expression omnibus (GEO)
+# ------- The single cell expression atlas
+# ------- Cell Atlas projects
+```
+
+# Marker-Based automatic annotation Strengths and Pitfalls
+```{r}
+# Strength:
+# ---- These methods will assign labels only to cells associated with known markers, and other cells will remain unlabeled.
+
+# Pitfalls:
+# ---- Markers are not easily available for all cell types: some of the common cell types like immune cells or common cell types which have been extensively studied the markers for which will be available but if there are rare cell types which have not yet been well characterized or studied the markers for those cell types would be hard to obtain.
+# ---- The marker gene or the gene set (a collection of marker genes) should be specifically and consistently expressed in a given cell or cluster.
+# ---- Work well once a relevant and sufficiently large set of marker genes are collected.
+# ---- These methods work better for annotating major cell types but may not be very well effective or efficient in distinguishing subtypes.
+```
+
+# Marker-Based automatic annotation Strengths and Pitfalls
+```{r}
+# Strength:
+# ---- Accurately assign labels and avoid incorrect labeling of novel cell types.
+
+# Pitfalls:
+# ---- Approach is feasible only if high-quality and relevant annotated reference single-cell data are available.
+# ---- Some tools have low accuracy if the reference data are incomplete or represent a poor match. So it is depending on how well that is a match to your query data set in terms of the types of cells that you anticipate your data to have. The reference data will highly affect the labeling and annotation of your data if you're using that data set as your reference data set.
+```
+
+# In here, we use SingleR which uses a reference based approach to annotate single cells
+```{r}
+# SingleR compares the gene expression profile of each cell with a set of reference samples that are already labeled. It uses a statistic calls Spearman correlation to measure how similar the gene expression of a test cell is to each reference sample. The correlation helps to account for differences that can occur when the cells come from different experiments or batches so basically it helps with the batch effect.
+
+# It focuses on specific genes that are called as marker genes that are characteristic of each cell type. These marker genes are identified by comparing the labels of the reference samples.
+
+# For each cell, SingleR calculates a score for each label in the reference data set based on correlation so this score represents how well the cell matches each label.
+# The score is determined by taking a fixed quantile or percentage of the correlations for each label.
+# Every cell in our query data set will have a score for all labels in the reference data set.
+# the label with the highest score is considered the prediction for that cell. SingleR assigns the cell to cell type with the highest score.
+
+# SingleR can perform a fine tuning step to improve the resolution between closely related cell types by narrowing down the reference data set to only include labels that have scores to the maximum. It re-calculates these scores using the only marker genes from the subset of these labels which are the closely related cell types focusing on the most relevant features. This process is repeated until only one label remains resulting in a more precise classification for closing related cell types.
+```
+
+# Design and Goal
+```{r}
+# PBMCs of a health female donor aged 25-30 were obtained by 10x Genomics
+# Goal: Annotate cell types in 20k human peripheral blood mononuclear cells (PBMCs)
+
+# Dataset link: https://www.10xgenomics.com/datasets/20-k-human-pbm-cs-3-ht-v-3-1-chromium-x-3-1-high-6-1-0
+```
+
+# Input Data 10X CellRanger .HDF5 format
+```{r}
+# Count Matrix
+hdf5_obj <- Read10X_h5(filename = '/Users/chenjiqing/Public/scRNA_seq/20k_PBMC_3p_HT_nextgem_Chromium_X_filtered_feature_bc_matrix.h5',
+                       use.names = TRUE,
+                       unique.features = TRUE)
+
+# Use the count matrix to create a Seurat object
+pbmc.seurat <- CreateSeuratObject(counts = hdf5_obj)
+pbmc.seurat
+```
+
+# QC and Filtering
+```{r}
+# In order to run SingleR, it is not necessary to filter out low quality cells or perform any prior normalization or scaling of the data you can use just raw counts to perform annotation using SingleR.
+pbmc.seurat$mitoPercent <- PercentageFeatureSet(pbmc.seurat, pattern = '^MT-')
+pbmc.seurat.filtered <- subset(pbmc.seurat, subset = nCount_RNA > 800 &
+                               nFeature_RNA > 500 &
+                               mitoPercent < 10)
+```
+
+# Pre-process standard workflow (you do not need to perform pre-processing steps of Seurat in order to run SingleR and use SingleR to annotate cell types; SingleR can be run using counts)
+```{r}
+pbmc.seurat.filtered <- NormalizeData(object = pbmc.seurat.filtered)
+pbmc.seurat.filtered <- FindVariableFeatures(object = pbmc.seurat.filtered)
+pbmc.seurat.filtered <- ScaleData(object = pbmc.seurat.filtered)
+pbmc.seurat.filtered <- RunPCA(object = pbmc.seurat.filtered)
+pbmc.seurat.filtered <- FindNeighbors(object = pbmc.seurat.filtered, dims = 1:20)
+pbmc.seurat.filtered <- FindClusters(object = pbmc.seurat.filtered)
+pbmc.seurat.filtered <- RunUMAP(object = pbmc.seurat.filtered, dims = 1:20)
+# We will be performing these steps because we want to use the cluster information at a later part.
+
+# running steps above to get clusters
+View(pbmc.seurat.filtered@meta.data)
+DimPlot(pbmc.seurat.filtered, reduction = 'umap')
+```
+
+# Important Step: choose an appropriate reference data set. (our case the data that we are dealing with has pbmcs so technically we should be using a reference that has these kinds of cells like neutrophils, macrophages, and T cells...; It is also preferred to choose a reference that is generated using similar technology or protocol as your test data set)
+```{r}
+# SingleR also allows you to use custom references so you need to know that the expression values that you provide from your reference data set that needs to be log transformed before you provide it to SingleR. The rule does not apply to your query data set because SingleR computes the correlations within each cell which is unaffected by monotonic transformations like cell specific scaling or log transformation. 
+# The exception to this rule is when you're comparing data from full length technologies like Smart-seq to celldex references. When you're annotating Smart-seq data sets against celldex references, better performance can be achieved by processing the test counts to transcript per million values.
+
+# celldex package basically a package that provides reference data set that are derived from bulk-RNA sequencing or microarray data of cell populations that consist of pure cell types after sorting or culturing. Basically, these references are often good enough for most applications. It contains the cell types that are expected in your test data.
+
+# The reference data set that we're going to use is human primary cell Atlas. This reference consists of publicly available microarray data set derived from primary or human primary cells and most of the labels refer to blood sub-populations but cell type from other tissues are also available.
+
+# get reference data
+ref <- celldex::HumanPrimaryCellAtlasData()
+# This object is basically summarize experiment object and the data here we have log counts.
+View(as.data.frame(colData(ref))) # Check the label main if contains our expected cell types
+# label.main: consists of broad annotation of major subtype. You can use this column basically for you annotation of the test data set. This will allow for quicker annotation but at a lower resolution.
+# label.fine: more fine-grained annotations of subtypes of cells and states. The labels here are much more so it will take a longer time to annotate your test data but at a deeper or finer resolution.
+# label.ont: label ontology are the salontology terms that are basically standard vocabulary that are mapped to these annotations.
+```
+
+# Run SingleR (default mode)
+```{r}
+# get the counts data from our query data our data set
+pbmc_counts <- GetAssayData(pbmc.seurat.filtered, slot = 'counts') # get raw counts
+
+# default for SingleR is to perform annotation of each individual cell in the test dataset
+pred <- SingleR(test = pbmc_counts,
+        ref = ref,
+        labels = ref$label.main)
+# labels: should be a vector of labels for all the samples in our reference data set. Nit use label.fine here because I just want like a quicker annotation result.
+
+pred
+pred_df <- as.data.frame(pred)
+# the row names are the cell barcodes.
+# labels: the predicted label after fine tuning.
+# pruned.labels: is a process which removes the low quality labels based on scores. Basically, pruned labels will have all the labels after pruning so the low quality labels will be replaced by NA in this column.
+
+# Visualize singleR labels in a UMAP plot
+pbmc.seurat.filtered$singleR.labels <- pred$labels[match(rownames(pbmc.seurat.filtered@meta.data), rownames(pred))]
+DimPlot(pbmc.seurat.filtered, reduction = 'umap', group.by = 'singleR.labels')
+```
+
+# Annotation diagnostics (we need to further identify how well SingleR has performed the job. Perform some Diagnostics in terms of quantifying or measuring how well SingleR has performed the job.)
+```{r}
+# 1st. Based on the scores within cells
+pred$scores # these are correlation of each cell with every label in the reference data set. Or: a numeric matrix of correlations at the specified quantile for each label (column) with each cell (row).
+
+# we would want to see is that a score for one cell should clearly be larger for one label compared to the other labels so basically it's just to evaluate the unambiguity of the label assignment
+plotScoreHeatmap(pred)
+# Each column in this heat map is a cell and the row rows here are the labels. This plot is used to determine whether the cell type assignments have been unambiguous
+# Ideally each cell here should have a higher score in one label related to the other labels.
+# If you see ambiguity in your setup assignments then that can be further inspected by perhaps using a more fine labels to refine further subtypes of cells that could be present in the larger subgroup of cells.
+# Downside: These are the pre-tuned scores which are stored in the Matrix. The scores after fine tuning are not comparable across the labels so that could mean that the label with the highest score may not be the cell's final label if fine tuning is applied. This method is can be used to highlight any differences between labels within each cell.
+```
+
+# 2nd. Based on deltas across cells (in order to identify poor quality or ambiguous assignments we can plot the distribution of Delta values)
+```{r}
+# Each cell gets assigned a delta value which basically low delta values indicate that the assignment is uncertain.
+# delta.next: containing the difference between the best and next-best score.
+plotDeltaDistribution(pred)
+# The idea here is basically to detect the cells that are outliers within each labels which could indicate of ambiguous assignments.
+# It's just a distribution of delta values for each labels, and each dot here is a cell.
+# They are colored by whether they have been pruned or not.
+# This could again be another diagnostic plot in terms of looking at which other labels having higher cells which have poor delta values. Indicate unclear assignment and those cells within that label could be further investigated.
+```
+
+# Comparing my cell type assignments with the results of unsupervised clustering
+```{r}
+# calculate the numbers of cell type labels for each cluster (for this reason I perform clustering)
+tab <- table(Assigned=pred$labels, Clusters=pbmc.seurat.filtered$seurat_clusters)
+tab # Rows are the assigned labels and for each of the Clusters (column) I have the number of cells that are assigned to that cluster.
+
+pheatmap(log10(tab+10), color = colorRampPalette(c('white','blue'))(10)) 
+# log transform: because you can see that there are a lot of zeros and a few of the numbers are extremely large so I don't want my heat map to be dictated by a few large numbers. For those zeros, log10(0) = -inf, so add a pseudo count of 10.
+# color = colorRampPalette(c('white','blue'))(10): the low value should be white the higher values should be blue; round 10 values to be created between these colors.
+
+# There are several clusters which are nested within Monocytes and several clusters nested within T cells, and this could indicate that there are finer subdivisions of all types of cells (Monocyte, T cell) that could be present in these clusters.
+
+# There are clusters like cluster 17, for example, which have some cells labeled as B cells some cells labeled as Pre-B, some cells labeled as T cells some as Monocytes. There maybe ambiguity in terms of cell type assignment when we compare it with the cluster assignment.
+
+# When we are using a method like unsupervised clustering we are basically grouping things together based on similarities so there are chances that the groupings that we get do not match with the labels we have.
+
+# Since unsupervised clustering provides us and helps us discover new and different variation that we may have not have known before, and the labels that we have are based on the existing knowledge of what we have. So the discrepancy between the cluster and the labels are not a concern as these are the conceptual differences between each of the approaches but both of them are still valuable.
+
+# Another way to get further confidence in the cell type assignments is to look at the expression of markers for certain cell types. Since our data contains B cells and B cells are the type of cells that have been extensively studied and we have good set of marker genes available. We can look at the expression of these markers in the cells that are assigned or labeled as B cells by SingleR to check how confident we are in terms of the expression of these markers at those cells compared to the other cells.
+```
+
