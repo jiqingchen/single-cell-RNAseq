@@ -1,0 +1,181 @@
+---
+title: "8_Integrate_scRNA_Seq_datasets"
+author: "Ji-Qing Chen"
+date: "2024-08-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(ggplot2)
+library(tidyverse)
+library(gridExtra)
+
+# ref : https://www.youtube.com/watch?v=HrbeaEJqKcY&list=PLJefJsd1yfhagnkss5B1YCsHaH0GWQfFT&index=5
+
+# Data: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE180665
+```
+
+# Goals
+```{r}
+# 1: Identify distinct tumor cell populations and understanding key genetic mechanisms are through single cell RNA sequencing. (samples are collected from three patients)
+
+# 2: To integrate data from different patients and correct for batch effects.
+```
+
+# Design
+```{r}
+# Samples from human tumor, background liver and patient derived xenografts (PDX) were collected to demonstrate gene expression patterns within tumor and to identify intra-tumor cell subtype heterogeneity to define differing roles in pathogenesis based on intracellular signalling in pediatric hepatoblastoma.
+
+# we will perform horizontal integration: because 1. Same modality from independent group cells (ex: scRNA-seq from same tissues from different patients/donors/sequencing technologies). 2. Assays are anchored by common gene set.
+```
+
+# When to integrate
+```{r}
+# When you have multiple RNA sequencing data sets from different conditions or different treatments or maybe different samples or different patients.
+
+# You can also use integration for cell label transfer - Transfer cell type classifications from a reference to a query data set. Ex: if you have a well annotated data set, you can use that as a reference to transfer the cell labels or annotations to the query data set.
+
+# Integration of multimodal single cell data (e.g. scRNA-Seq and scATAC-Seq) - integrate, into a single-cell multi-omic dataset, signals collected from separate assays.
+
+# Integration of scRNA-Seq and spatial expression data - integrate topological arrangement of cells in tissues with gene expression data
+```
+
+# Get data location and create seurat objects
+```{r}
+dirs <- list.dirs(path = '/Users/chenjiqing/Public/scRNA_seq/GSE180665_RAW_for_8_Integrate_practice/', recursive = F, full.names = F)
+# within each of these folders in the data directory we have our barcode, matrix, and the features file
+
+# create a for loop and in each iteration it should go in each folder and fetch the files to create the counts matrix.
+# Then using the count matrix to create a Seurat object and assign it to a variable that has both the patient information as well as the type of the tissue
+for(x in dirs){
+  name <- gsub('_filtered_feature_bc_matrix','', x) # Create the variable names
+  
+  # Create count matrix
+  cts <- ReadMtx(mtx = paste0('/Users/chenjiqing/Public/scRNA_seq/GSE180665_RAW_for_8_Integrate_practice/',x,'/matrix.mtx.gz'),
+          features = paste0('/Users/chenjiqing/Public/scRNA_seq/GSE180665_RAW_for_8_Integrate_practice/',x,'/features.tsv.gz'),
+          cells = paste0('/Users/chenjiqing/Public/scRNA_seq/GSE180665_RAW_for_8_Integrate_practice/',x,'/barcodes.tsv.gz'))
+  
+  # Create Seurat objects and assign it to a variable that has both the patient information and the tissue type
+  assign(name, CreateSeuratObject(counts = cts)) # assign the Seurat object to the value of name
+  # Could not use name <- CreateSeuratObject(counts = cts), because it would just assign it to a variable called "name"
+}
+
+# The next steps we would essentially want to look at each of these objects and perform quality control and filter out low quality cells. We can still do it manually by going going through them one by one and performing quality control and filtering the low quality cells but this is a tedious process time consuming and it would be more error prone since we are doing it manually. And again this is a smaller data set. 
+
+# So another option is to actually merge all these objects together into one object. Here we are just merging the data sets we are not performing integration so we are just combining all the Seurat objects together into one Seurat object so we could essentially perform quality control and filtering on all of them simultaneously rather than going through each of them and performing those steps over and over again.
+```
+
+# Merge datasets
+```{r}
+ls()
+merged_seurat <- merge(HB17_background, y = c(HB17_PDX, HB17_tumor, HB30_PDX, 
+                                              HB30_tumor, HB53_background, HB53_tumor),
+      add.cell.ids = ls()[3:9], # it's important to do that because when all these objects will be merged, we wouldn't be able to identify which cell barcodes are from which data set so in order to do that we can add cell ids; ls(): from the third value to the ninth value would be my cell ids.
+      project = 'HB')
+
+
+merged_seurat # we have 33538 genes or features across 77936 samples
+```
+
+# QC & filtering
+```{r}
+View(merged_seurat@meta.data) # we can see the number of transcript counts and the number of genes from each cell; and the cell barcodes have prefix the patient id and the type of the tissue
+
+# Create another columns that would essentially tell us what a patient and from what tissue is the cell barcode originated from
+# ---- create a sample column
+merged_seurat$sample <- rownames(merged_seurat@meta.data)
+# ---- split sample column based on the underscore so I have three columns having the patient ids, the type of the tissue, and the barcodes
+merged_seurat@meta.data <- separate(merged_seurat@meta.data, col = 'sample', into = c('Patient', 'Type', 'Barcode'), 
+         sep = '_')
+
+# calculate mitochondrial percentage
+merged_seurat$mitoPercent <- PercentageFeatureSet(merged_seurat, pattern='^MT-')
+
+# explore QC (if you want)
+# ---- look at additional metrics to assess the quality of our data
+# -------- look at the number of cells in our samples
+# -------- look at number of transcript counts as well as the number of genes and correlate them with each other
+# -------- find how many of our cells have both the high number of transcripts as well as high number of genes
+
+# filtering (using the thresholds that the authors have used in the paper to filter the cells)
+merged_seurat_filtered <- subset(merged_seurat, subset = nCount_RNA > 800 &
+         nFeature_RNA > 500 &
+         mitoPercent < 10)
+
+merged_seurat_filtered
+
+merged_seurat
+```
+
+# Perform standard workflow steps to figure out if we see any batch effects
+```{r}
+merged_seurat_filtered <- NormalizeData(object = merged_seurat_filtered)
+merged_seurat_filtered <- FindVariableFeatures(object = merged_seurat_filtered)
+merged_seurat_filtered <- ScaleData(object = merged_seurat_filtered)
+merged_seurat_filtered <- RunPCA(object = merged_seurat_filtered)
+ElbowPlot(merged_seurat_filtered) # After linear dimensionality reduction we find the dimension of our data set.
+# Almost until the first 15 principal components seems to be capturing the majority of the variation so I'm just going to consider all 20 dimensions in the next steps.
+merged_seurat_filtered <- FindNeighbors(object = merged_seurat_filtered, dims = 1:20)
+merged_seurat_filtered <- FindClusters(object = merged_seurat_filtered)
+merged_seurat_filtered <- RunUMAP(object = merged_seurat_filtered, dims = 1:20)
+
+# plot
+# color the cells by the patient -> know which cells are coming from which patient 
+p1 <- DimPlot(merged_seurat_filtered, reduction = 'umap', group.by = 'Patient')
+# color the cells by the tissue type -> know which cells are coming from what tissue type
+p2 <- DimPlot(merged_seurat_filtered, reduction = 'umap', group.by = 'Type',
+              cols = c('red','green','blue'))
+
+grid.arrange(p1, p2, ncol = 2, nrow = 2)
+# In the right plot, it gives us a misleading image that we see sub-populations of cells within our tissue type but the from the plot on the left we can easily identify that the clustering that we see is due to the technical variation and not due to biological variation among the cells.
+# In left, we can see that the cells are coming from different patients clusters separately and it's actually masking the biological variation and these cells are not truly clustering according to the biological variation but due to the technical differences.
+# We need to correct for the batch effects so that we can allow cells to cluster according to the biological variation.
+```
+
+# Perform integration to correct for batch effects
+```{r}
+# Split object (split it by patient because we see batch effects coming from different patients)
+obj.list <- SplitObject(merged_seurat_filtered, split.by = 'Patient')
+obj.list # it consists of the list of objects split according to the patient. so for each patient we have an object and it's stored as a list
+
+# For each of the object in the list we need to run normalization and identify highly variable features.
+for(i in 1:length(obj.list)){
+  obj.list[[i]] <- NormalizeData(object = obj.list[[i]])
+  obj.list[[i]] <- FindVariableFeatures(object = obj.list[[i]])
+}
+
+# Select integration features
+features <- SelectIntegrationFeatures(object.list = obj.list)
+
+# Next, we need to find anchors to integrate the data across different patients. -> find integration anchors (CCA: canonical-correlation analysis)
+# Ref. : https://www.cell.com/cell/fulltext/S0092-8674(19)30559-8?_returnURL=https%3A%2F%2Flinkinghub.elsevier.com%2Fretrieve%2Fpii%2FS0092867419305598%3Fshowall%3Dtrue#secsectitle0020
+anchors <- FindIntegrationAnchors(object.list = obj.list, anchor.features = features)
+
+# integrate data
+seurat.integrated <- IntegrateData(anchorset = anchors)
+```
+
+# After the integration has finished running we would want to perform the similar steps of the standard workflow that we perform for the merge data or the non-integrated data.
+```{r}
+seurat.integrated <- ScaleData(object = seurat.integrated)
+seurat.integrated <- RunPCA(object = seurat.integrated)
+seurat.integrated <- RunUMAP(object = seurat.integrated, dims = 1:50)
+
+
+p3 <- DimPlot(seurat.integrated, reduction = 'umap', group.by = 'Patient')
+p4 <- DimPlot(seurat.integrated, reduction = 'umap', group.by = 'Type',
+              cols = c('red','green','blue'))
+
+grid.arrange(p3, p4, ncol = 2)
+# The cells are no longer separating out because they are from different patients (P3) but they are separating out due to the biological similarities (P4).
+# (P4) We can see that the cells from the pdx's and tumors overlap at a lot of places and they are separated out from the cells coming from the background tissues.
+# (P3) Because of integration and correction of the batch effects, we can see between group variation and not within group variation. -> this means that the integration has been successfully been able to take care of the batch effects. We can use this integrated data for further downstream analysis
+
+grid.arrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
+# the plots on the top are before integration; the bottom are after integration
+# We can clearly see that earlier our cells are separated out because they were sequenced from different patients
+# after integration after we have taken care of the batch effects, the cells overlap and they are actually separating out here due to the biological variation and not because of the technical variation or the batch effects
+```
+

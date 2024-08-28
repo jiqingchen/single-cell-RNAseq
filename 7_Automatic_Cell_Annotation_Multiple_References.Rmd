@@ -1,0 +1,236 @@
+---
+title: "Automatic_Cell_Annotation_Multiple_References"
+author: "Ji-Qing Chen"
+date: "2024-07-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(SingleR)
+library(celldex)
+library(Seurat)
+library(tidyverse)
+library(pheatmap)
+```
+
+########### Strategy 1: Using reference-specific labels in a combined reference ###########
+```{r}
+# Combined reference don't mean references where the labels are harmonized we just mean combining both the separate references which involves combining the expression Matrix and also labeling or considering each label in context of its reference data set.
+
+# example: we have reference X and reference Y and both the references have B cells. So the B cells from reference X will be considered to be different or a separate entity compared to the B cells in a reference data set Y. This strategy is useful when the difference between both your reference data set is important. If reference data set X is derived from healthy patients or healthy tissues and reference data set Y is derived from a tumor patient or from tumor tissues. This combination of reference data sets can be used to annotate data sets where your query data set can contain both the healthy and the diseased cells.
+
+# Cons:
+# ---- there is no way to easily distinguish between uninteresting batch effects and genuine biological differences between your reference data sets.
+# ---- loss of precision due to noise during the calculation of the score in each reference
+# Risk of technical variation dominating classification results.
+```
+
+########### Strategy 2: Combining score across multiple references (default approach implemented in SingleR) ###########
+```{r}
+# This performing classification separately with each reference and then combining the results to choose the label with the highest score across the references.
+
+# The biggest advantage of this method is that it avoids the reference specific batch effects from comparing the expression values across the references so this method is a default method which is implemented in SingleR (because the test data set is compared and annotated with each individual references). 
+# When SingleR is provided with multiple references, the function first annotates the test data set with each reference individually. Basically comparing the test data set with each individual references are one-on-one and for each cell the function collects its printed labels across all the references. 
+
+# It identifies the union of markers that are up-regulated in the predicted labels across uh all the references so it involves re-computation of the scores across the identified marker subset across all these labels from different references. Basically it is ensuring that these scores are derived from the same set of chains.
+
+# Lastly, the function identifies the overall best scoring label as the final prediction for that cell.
+
+# They also provide the poor reference annotation in the results and this is specifically helpful as it allows for more detailed Diagnostics and troubleshooting and further analysis
+
+# Cons:
+# ---- Lack of consistency in labels across multiple references complicates interpretation.
+```
+
+########### Strategy 3: Using harmonized labels in a combined reference ###########
+```{r}
+# Using standardized vocabulary or cell ontology terms to refer to the same cell which have the same terminology across different diverse data sets.
+# The same term is used for the same conceptual cell type in each reference.
+# Basically providing these standardized vocabulary to SingleR instead of providing labels while performing annotation.
+
+# This the results would yield annotations that follow the same vocabulary regardless of the reference used for assignment.
+
+# Cons:
+# ---- The assumption that the harmonized labels are available which is not usually true as some manual mapping is required to map the author-provided labels to a common vocabulary.
+# ---- Mapping process also runs the risk of discarding relevant information about the biology status (e.g., activationt status, disease condition) if there is no obvious counterpart for that state in the ontology.
+```
+
+# Input Data 10X CellRanger .HDF5 format
+```{r}
+# Count Matrix
+hdf5_obj <- Read10X_h5(filename = '/Users/chenjiqing/Public/scRNA_seq/20k_PBMC_3p_HT_nextgem_Chromium_X_filtered_feature_bc_matrix.h5',
+                       use.names = TRUE,
+                       unique.features = TRUE)
+
+# Use the count matrix to create a Seurat object
+pbmc.seurat <- CreateSeuratObject(counts = hdf5_obj)
+pbmc.seurat
+```
+
+# QC and Filtering
+```{r}
+# In order to run SingleR, it is not necessary to filter out low quality cells or perform any prior normalization or scaling of the data you can use just raw counts to perform annotation using SingleR.
+pbmc.seurat$mitoPercent <- PercentageFeatureSet(pbmc.seurat, pattern = '^MT-')
+VlnPlot(pbmc.seurat, features = c("nFeature_RNA", "nCount_RNA", "mitoPercent"), ncol = 3)
+pbmc.seurat.filtered <- subset(pbmc.seurat, subset = nCount_RNA > 800 &
+                               nFeature_RNA > 500 &
+                               mitoPercent < 10)
+```
+
+# Pre-process standard workflow (you do not need to perform pre-processing steps of Seurat in order to run SingleR and use SingleR to annotate cell types; SingleR can be run using counts)
+```{r}
+pbmc.seurat.filtered <- NormalizeData(object = pbmc.seurat.filtered)
+pbmc.seurat.filtered <- FindVariableFeatures(object = pbmc.seurat.filtered)
+pbmc.seurat.filtered <- ScaleData(object = pbmc.seurat.filtered)
+pbmc.seurat.filtered <- RunPCA(object = pbmc.seurat.filtered)
+ElbowPlot(pbmc.seurat.filtered)
+pbmc.seurat.filtered <- FindNeighbors(object = pbmc.seurat.filtered, dims = 1:20)
+pbmc.seurat.filtered <- FindClusters(object = pbmc.seurat.filtered)
+pbmc.seurat.filtered <- RunUMAP(object = pbmc.seurat.filtered, dims = 1:20)
+# We will be performing these steps because we want to use the cluster information at a later part.
+
+# running steps above to get clusters
+View(pbmc.seurat.filtered@meta.data)
+DimPlot(pbmc.seurat.filtered, reduction = 'umap')
+```
+
+# Run SingleR with multiple reference datasets (default mode)
+
+# For pbmc data, we will use two datasets --- Fetching 2 reference datasets from celldex package
+```{r}
+# The first reference data set that we're going to use is human primary cell Atlas. This reference consists of publicly available microarray data set derived from primary or human primary cells and most of the labels refer to blood sub-populations but cell type from other tissues are also available.
+hpca <- celldex::HumanPrimaryCellAtlasData()
+
+# The second reference data set that we will be using is the database immune cell expression data this reference essentially contains bulk RNA sequencing samples of sorted immune cell populations.
+dice <- celldex::DatabaseImmuneCellExpressionData()
+```
+
+# Strategy 1: Using reference-specific labels
+```{r}
+# The labels would be considered in the context of the reference and each label will be considered as a separate entity. So there will be chances that the references that we are using especially in our case will contain immune cell types.
+# There will be a possibility that the same label could be present in both the references. In order to distinguish them from each other we need to add some information which tells us where the particular label is originating from.
+
+# Show the label.main for each of these references look like
+hpca$label.main
+dice$label.main
+# There will be some labels which will be present in both the references
+
+# adding ref info to label names (tells us where the label is originating from)
+hpca$label.main <- paste0('HPCA.', hpca$label.main)
+dice$label.main <- paste0('DICE.', dice$label.main)
+
+# create a combined ref based on shared genes
+shared <- intersect(rownames(hpca), rownames(dice)) # create a vector that holds the shared genes between both the references; rownames(hpca) is gene names in hpca
+combined <- cbind(hpca[shared,], dice[shared,]) # combine both the references by retaining these genes
+combined # we have created a new summarize experiment object which holds the shared genes and contains the labels from both the references
+combined$label.main
+
+# run singleR using combined ref
+# savings counts into a separate object
+pbmc_counts <- GetAssayData(pbmc.seurat.filtered, slot = 'counts')
+
+com.res1 <- SingleR(test = pbmc_counts, ref = combined, labels = combined$label.main)
+table(com.res1$labels) # check the number of cells that are assigned to each label
+
+# transfer all these labels and save it into a metadata in our Seurat object
+pbmc.seurat.filtered$com.res1.labels <- com.res1[match(rownames(pbmc.seurat.filtered@meta.data), rownames(com.res1)), 'labels'] # rownames(x) is cell IDs
+View(pbmc.seurat.filtered@meta.data)
+
+DimPlot(pbmc.seurat.filtered, reduction = 'umap', group.by = 'com.res1.labels', label = TRUE)
+# there have been some cells which are essentially the same type. But for these cells, the highest scoring label matches from one reference compared to the other and vice versa.
+
+# Essentially, this combined reference approach would make more sense if we are trying to annotate a data set that would have cells that match both the references. But in this case, we are trying to annotate the the blood cells of populations. Here, a combined reference approach would not be a very useful approach since we essentially have the same types of cells present in both the references.
+# What we would essentially want is some sort of harmonization across these references or maybe one label which is essentially a high scoring label across the references
+```
+
+# Strategy 2: Comparing scores across references
+```{r}
+# We would want to remove previously added string from both our references in the first strategy.
+hpca$label.main
+dice$label.main
+hpca$label.main <- gsub('HPCA\\.','', hpca$label.main)
+dice$label.main <- gsub('DICE\\.','', dice$label.main)
+
+com.res2 <- SingleR(test = pbmc_counts,
+                    ref = list(HPCA = hpca, DICE = dice),
+                    labels = list(hpca$label.main, dice$label.main)) # would be your list which corresponds to the order of the references we provided
+
+# Check the final label from the combined assignment.
+table(com.res2$labels) # check the number of cells for each label
+# This strategy returns the best scoring label as a final prediction for each cell across all the labels
+# Lack of consistency in labels across references: We can see B cells essentially are present in both the references but the way that they are referred to is different in each of the reference and due to that SingleR considers each of them as a separate label and this is essentially something that the strategy does not handle
+
+# which reference scored best for which label?
+grouping <- paste0(com.res2$labels,'.', com.res2$reference)
+best_ref <- as.data.frame(split(com.res2, grouping)) # we will be using "grouping" to split the object or the data frame. Split the combined result 2 object with the grouping variable.
+# tells us which reference score the best for that particular label for any particular cell type.
+
+# get de. genes from each individual references (get the marker genes for each individual cell type for each reference)
+metadata(com.res2$orig.results$HPCA)$de.genes # differentially expressed genes 
+metadata(com.res2$orig.results$DICE)$de.genes
+# this information can be used for further detailed Diagnostics troubleshooting or for further analysis
+
+# Combined diagnostics (visualize scores in individual references and combined scores across references (references are not combined  in this strategy))
+plotScoreHeatmap(com.res2)
+# visualize the scores for each cell type assignment to each label
+# Top: visualizes a score or recomputed scores in the combined results.
+
+# The annotation bar at the top of each of the heat map represents the final combined prediction for each cell. (each column here is a cell and each row is a label)
+
+# In the combined scores Heat Map (top), only the labels, which are predicted in the individual references, the scores are recomputed. The rest of the labels are set to NA, hence, we see a high proportion of gray in the top heat map compared to the following heat Maps.
+
+# These heat maps visualize these scores which are the initial assignment scores or pre-tuned scores which are stored in the matrix
+
+################# the lack of consistency in these labels can be circumvented with using harmonized labels #################
+```
+
+# Strategy 3: Using harmonized labels
+```{r}
+# Using harmonized labels which is a way we can use a standard terminology or standard vocabulary.
+
+# We will be using cell ontology terms instead of gene names in SingleR command in place of the labels.
+# These ontology terms refer to the same conceptual cell with using the same term across each reference. So the resulting annotation will result the same vocabulary regardless of which reference it is coming from.
+
+# Retrieve the reference data set but exclude the samples that could not be mapped to the ontology
+hpca.ont <- celldex::HumanPrimaryCellAtlasData(cell.ont = 'nonna') # set the cell ontology to non-NA so only the non-NA samples in terms of ontology will be retrieved
+dice.ont <- celldex::DatabaseImmuneCellExpressionData(cell.ont = 'nonna')
+
+# Using the same sets of genes:
+shared <- intersect(rownames(hpca.ont), rownames(dice.ont))
+hpca.ont <- hpca.ont[shared,]
+dice.ont <- dice.ont[shared,]
+
+# Showing the top 10 most frequent terms:
+tail(sort(table(hpca.ont$label.ont)),10)
+tail(sort(table(dice.ont$label.ont)), 10)
+
+# using label.ont instead on label.main while running SingleR
+
+com.res3 <- SingleR(test = pbmc_counts,
+        ref = list(HPCA = hpca.ont, DICE = dice.ont),
+        labels = list(hpca.ont$label.ont, dice.ont$label.ont)) # provide the ontology terms instead of labels
+
+
+table(com.res3$labels)
+# these labels would be the cell ontology term
+# get the number of cells that are assigned to each of these ontology terms
+
+
+# How to get what these ontology term mean in terms of what are these cell types that these ontology terms represent?
+# How to map cell ontology terms? ----------------
+
+# The most easiest way is to get the colData for each of these references
+colData(hpca.ont)
+colData(dice.ont)
+# You will be able to see that these ontology terms can be mapped to the label.main or label.fine which essentially are the names of these cells.
+# Then, simply create a data frame and add this information (label.main or label.fine) into the Seurat metadata and can visualize these labels in a UMAP.
+
+# Another way:
+# These files that come with the celldex package are called mapping. These are basically the .tsv files which basically provide the mapping between the ontology terms and the names of the cell.
+hpca.fle <- system.file("mapping","hpca.tsv", package = "celldex") # This will provide you with the path to where this mapping file is present
+hpca.mapping <- read.delim(hpca.fle, header = F) # We can simply read this mapping file using the read.delim command.
+# In the data frame (hpca.mapping) you will be able to find the ontology term and the corresponding cell type.
+# You can also find the file for the other data set as well. For example: dice.tsv for the other reference.
+```
+
